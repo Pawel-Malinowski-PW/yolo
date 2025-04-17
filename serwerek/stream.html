@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO v3 Tiny</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f9f9f9;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #444;
+        }
+
+        p {
+            margin-bottom: 20px;
+            font-size: 1rem;
+            text-align: center;
+        }
+
+        .container {
+            max-width: 400px;
+            width: 90%;
+            text-align: center;
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        #stream-display {
+            width: 100%;
+            max-width: 300px;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            display: inline-block;
+            margin: 5px;
+            padding: 10px 20px;
+            font-size: 1rem;
+            color: #fff;
+            background: #007bff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:active {
+            background: #003f7f;
+        }
+
+        button:last-of-type {
+            background: #6c757d;
+        }
+
+        button:last-of-type:hover {
+            background: #5a6268;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>YOLO v3 Tiny</h1>
+        <div>
+            <video id="video" autoplay playsinline style="display: none;"></video> <!-- Hidden video element -->
+            <img id="stream-display" alt="Stream not available" />
+        </div>
+        <button onclick="startStream()">Rozpocznij Stream</button>
+        <button onclick="startScript()">Włącz Detekcję</button>
+        <button onclick="stopScript()">Wyłącz Detekcję</button>
+        <button onclick="location.href='index.html'">Menu Główne</button>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const streamDisplayElement = document.getElementById('stream-display');
+        let ws;
+        let scriptRunning = false;
+
+        function startStream() {
+            ws = new WebSocket('wss://172.29.192.121:8080');
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                ws.send('stream'); // zidentyfikuj jako klient streamujący
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const blob = new Blob([event.data], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    streamDisplayElement.src = url;
+
+                    // zwolnij URL po załadowaniu
+                    streamDisplayElement.onload = () => URL.revokeObjectURL(url);
+                } catch (error) {
+                    console.error('Error processing frame:', error);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket closed');
+            };
+
+            // dostęp do kamery
+            navigator.mediaDevices.getUserMedia({
+                video: {
+                    width: 416,
+                    height: 416,
+                    facingMode: { exact: "environment" } // kamera tylnia
+                }
+            })
+            .then((stream) => {
+                videoElement.srcObject = stream;
+
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 416;
+                canvas.height = 416;
+
+                setInterval(() => {
+                    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                    canvas.toBlob((blob) => {
+                        if (blob && ws.readyState === WebSocket.OPEN) {
+                            ws.send(blob); // wyślij klatkę do serwera
+                        }
+                    }, 'image/jpeg');
+                }, 100); //co 100ms
+            })
+            .catch((error) => {
+                console.error("Error accessing the camera:", error);
+                alert("Unable to access the camera.");
+            });
+        }
+
+        function startScript() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('start-script'); // wyślij komendę do uruchomienia skryptu
+                console.log('Start script command sent');
+                scriptRunning = true;
+            } else {
+                console.error('WebSocket is not open');
+            }
+        }
+
+        function stopScript() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('stop-script'); // wyślij komendę do zatrzymania skryptu
+                console.log('Stop script command sent');
+                scriptRunning = false;
+            } else {
+                console.error('WebSocket is not open');
+            }
+        }
+    </script>
+</body>
+</html>
