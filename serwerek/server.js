@@ -37,10 +37,11 @@ const server = https.createServer(options, (req, res) => {
 const wss = new WebSocket.Server({ server });
 
 const clients = {
-    stream: null, // Klient wysyłający dane z kamery (stream.html)
-    view: [],     // Klienci odbierający oryginalne dane (view.html)
-    script: null, // Klient przetwarzający dane (script.py)
-    result: []    // Klienci odbierający przetworzone dane (result.html)
+    stream: null,
+    view: [],
+    script: null,
+    script2: null, // <--- dodaj to pole!
+    result: []
 };
 // zapytanie o zidentyfikowanie się
 function sendToClients(clients, data, isBinary) {
@@ -55,6 +56,9 @@ function handleStreamMessage(ws, data, isBinary) {
     sendToClients(clients.view, data, isBinary);
     if (clients.script && clients.script.readyState === WebSocket.OPEN) {
         clients.script.send(data, { binary: isBinary });
+    }
+    if (clients.script2 && clients.script2.readyState === WebSocket.OPEN) {
+        clients.script2.send(data, { binary: isBinary });
     }
     if (!pythonProcess && clients.stream && clients.stream.readyState === WebSocket.OPEN) {
         clients.stream.send(data, { binary: isBinary });
@@ -86,6 +90,9 @@ wss.on('connection', (ws, req) => {
             } else if (role === 'script') {
                 clients.script = ws;
                 console.log('Klient script połączony');
+            } else if (role === 'script2') {
+                clients.script2 = ws; // <--- obsługa nowej roli
+                console.log('Klient script2 połączony');
             } else if (role === 'result') {
                 clients.result.push(ws);
                 console.log('Klient result połączony');
@@ -95,28 +102,63 @@ wss.on('connection', (ws, req) => {
             return;
         }
 
-        if (data.toString() === 'start-script') {
-            console.log('Włączanie script.py...');
-            pythonProcess = spawn('python', ['script.py'], {
-                cwd: __dirname, // upewnij się, że skrypt jest w tym samym katalogu
+        function startPythonScript(args, env, scriptType) {
+            const pythonVenvPath = '/home/malinop4/yolo-venv/bin/python';
+            pythonProcess = spawn(pythonVenvPath, args, {
+                cwd: __dirname,
+                env
             });
-
+            pythonProcess.scriptType = scriptType; // <--- zapamiętaj typ
             pythonProcess.stdout.on('data', (data) => {
-                console.log(`script.py stdout: ${data}`);
+                console.log(`${args[0]} stdout: ${data}`);
             });
-
             pythonProcess.stderr.on('data', (data) => {
-                console.error(`script.py stderr: ${data}`);
+                console.error(`${args[0]} stderr: ${data}`);
             });
-
             pythonProcess.on('close', (code) => {
-                console.log(`script.py zakończył prace z kodem ${code}`);
-                pythonProcess = null; // zresetuj proces po zakończeniu
+                console.log(`${args[0]} zakończył pracę z kodem ${code}`);
+                pythonProcess = null;
             });
-        } else if (data.toString() === 'stop-script') {
+        }
+
+        if (data.toString() === 'start-script') {
+            if (pythonProcess && pythonProcess.scriptType === 'script') {
+                // YOLOv3 już działa, nie rób nic
+                console.log('YOLOv3 już działa, nie restartuję.');
+            } else if (pythonProcess) {
+                pythonProcess.kill();
+                pythonProcess.on('close', () => {
+                    startPythonScript(['script.py'], { ...process.env, LD_LIBRARY_PATH: path.join(__dirname, 'darknet/python') }, 'script');
+                });
+            } else {
+                startPythonScript(['script.py'], { ...process.env, LD_LIBRARY_PATH: path.join(__dirname, 'darknet/python') }, 'script');
+            }
+        } else if (data.toString() === 'stop-script' || data.toString() === 'stop-script2') {
             if (pythonProcess) {
-                console.log('Zatrzymywanie script.py...');
-                pythonProcess.kill(); // zabicie procesu
+                pythonProcess.kill();
+                pythonProcess.on('close', () => {
+                    pythonProcess = null;
+                    console.log('Proces detekcji został zatrzymany.');
+                });
+            } else {
+                console.log('Brak procesu do zatrzymania.');
+            }
+        } else if (data.toString() === 'start-script2') {
+            if (pythonProcess && pythonProcess.scriptType === 'script2') {
+                // YOLOv5 już działa, nie rób nic
+                console.log('YOLOv5 już działa, nie restartuję.');
+            } else if (pythonProcess) {
+                pythonProcess.kill();
+                pythonProcess.on('close', () => {
+                    startPythonScript(['script2.py'], { ...process.env }, 'script2');
+                });
+            } else {
+                startPythonScript(['script2.py'], { ...process.env }, 'script2');
+            }
+        } else if (data.toString() === 'stop-script2') {
+            if (pythonProcess) {
+                console.log('Zatrzymywanie script2.py...');
+                pythonProcess.kill();
                 pythonProcess = null;
             } else {
                 console.log('brak procesu do zatrzymania.');
@@ -127,6 +169,8 @@ wss.on('connection', (ws, req) => {
             handleStreamMessage(ws, data, isBinary);
         } else if (ws === clients.script) {
             handleScriptMessage(ws, data, isBinary);
+        } else if (ws === clients.script2) {
+            handleScriptMessage(ws, data, isBinary); // <--- dodane!
         } else if (ws.role === 'view') {
             // Dane od view.html -> do stream.html (raw frames)
             if (clients.stream && clients.stream.readyState === WebSocket.OPEN && !pythonProcess) {
@@ -136,21 +180,27 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
-        console.log('WebSocket rozłączony');
         // Usuń klienta z odpowiedniej grupy
         if (ws.role === 'stream') {
             clients.stream = null;
+            console.log('Klient stream rozłączony');
         } else if (ws.role === 'view') {
             clients.view = clients.view.filter(client => client !== ws);
+            console.log('Klient view rozłączony');
         } else if (ws.role === 'script') {
             clients.script = null;
+            console.log('Klient script rozłączony');
+        } else if (ws.role === 'script2') {
+            clients.script2 = null; // <--- usuń klienta script2
+            console.log('Klient script2 rozłączony');
         } else if (ws.role === 'result') {
             clients.result = clients.result.filter(client => client !== ws);
+            console.log('Klient result rozłączony');
         }
     });
 });
 
 // Nasłuchiwanie na porcie 8080
-server.listen(8080, '172.29.192.121', () => {
-    console.log('Serwer HTTPS działa na https://172.29.192.121:8080');
+server.listen(8080, 'localhost', () => {
+    console.log('Serwer HTTPS działa na https://localhost:8080');
 });

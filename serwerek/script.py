@@ -1,69 +1,110 @@
 import cv2
 import websocket
-import numpy as np
 import ssl
+import sys
+sys.path.insert(0, '/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/python')
+import darknet
+import numpy as np
+import signal
+import gc
+import torch
 
-# YOLOv3-tiny konfiguracja i wagi
-yolo_cfg = "yolov3-tiny.cfg"
-yolo_weights = "yolov3-tiny.weights"
-# Wczytanie modelu YOLOv3-tiny
-yolo_net = cv2.dnn.readNetFromDarknet(yolo_cfg, yolo_weights)
-yolo_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-yolo_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-# Pobranie nazw warstw
-layer_names = yolo_net.getLayerNames()
-# Pobranie nazw warstw wyjściowych
-try:
-    output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers().flatten()]
-except AttributeError:
-    # Dla starszych wersji OpenCV
-    output_layers = [layer_names[i[0] - 1] for i in yolo_net.getUnconnectedOutLayers()]
+# Załaduj sieć
+config_path = "/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/cfg/yolov3.cfg"
+weights_path = "/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/yolov3.weights"
+data_path = "/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/cfg/coco.data"
 
-# Wczytanie nazw klas
-with open("coco.names", "r") as f:
-    class_names = [line.strip() for line in f.readlines()]
+net = darknet.load_net(config_path.encode(), weights_path.encode(), 0)
+meta = darknet.load_meta(data_path.encode())
+
+# Konwersja numpy array (OpenCV BGR) do IMAGE (Darknet RGB)
+def array_to_image(arr):
+    import cv2
+    arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+    arr = arr.transpose(2, 0, 1)  # HWC -> CHW
+    c, h, w = arr.shape
+    arr = arr.flatten() / 255.0
+    data = (darknet.c_float * len(arr))()
+    data[:] = arr
+    im = darknet.IMAGE(w, h, c, data)
+    return im
+
+def detect_darknet_frame(net, meta, frame, thresh=0.5, hier_thresh=0.5, nms=0.45):
+    im = array_to_image(frame)
+    num = darknet.c_int(0)
+    pnum = darknet.pointer(num)
+    darknet.predict_image(net, im)
+    dets = darknet.get_network_boxes(net, im.w, im.h, thresh, hier_thresh, None, 0, pnum)
+    num = pnum[0]
+    if nms:
+        darknet.do_nms_obj(dets, num, meta.classes, nms)
+    res = []
+    for j in range(num):
+        for i in range(meta.classes):
+            if dets[j].prob[i] > 0:
+                b = dets[j].bbox
+                res.append((meta.names[i].decode(), dets[j].prob[i], (b.x, b.y, b.w, b.h)))
+    # NIE wywołuj darknet.free_image(im) tutaj!
+    darknet.free_detections(dets, num)
+    return res
 
 # Adres serwera WebSocket 
-ws_url = "wss://172.29.192.121:8080"
+ws_url = "wss://localhost:8080"
 
 # Funkcja obsługująca wiadomości przychodzące
+import threading
+from collections import deque
+
+# ...istniejący kod...
+
+frame_queue = deque(maxlen=3)
+queue_lock = threading.Lock()
+processing = False
+
 def on_message(ws, message):
+    global frame_queue
+    with queue_lock:
+        frame_queue.append(message)
+    # Uruchom przetwarzanie jeśli nie trwa
+    start_processing(ws)
+
+def start_processing(ws):
+    global processing
+    with queue_lock:
+        if processing or not frame_queue:
+            return
+        processing = True
+        frame_data = frame_queue.popleft()
+    threading.Thread(target=process_frame, args=(ws, frame_data)).start()
+
+def process_frame(ws, frame_data):
+    global processing
     try:
-        # Konwersja odebranych danych na obraz
-        np_arr = np.frombuffer(message, np.uint8)
+        np_arr = np.frombuffer(frame_data, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
         if frame is not None:
-            # Przygotowanie klatki do YOLO
-            blob = cv2.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
-            # Ustawienie wejścia dla modelu
-            yolo_net.setInput(blob)
-            # Wykonanie detekcji
-            detections = yolo_net.forward(output_layers)
 
-            # Rysowanie prostokątów ograniczających na klatce
-            for detection in detections:
-                for obj in detection:
-                    scores = obj[5:]
-                    class_id = np.argmax(scores)
-                    confidence = scores[class_id]
-                    if confidence > 0.5:  # próg pewności
-                        # Obliczanie współrzędnych prostokąta ograniczającego
-                        center_x, center_y, width, height = (obj[0:4] * np.array([frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]])).astype("int")
-                        x = int(center_x - width / 2)
-                        y = int(center_y - height / 2)
-                        cv2.rectangle(frame, (x, y), (x + int(width), y + int(height)), (0, 255, 0), 2)
-                        label = f"{class_names[class_id]}: {confidence:.2f}"  # etykieta z nazwą klasy i pewnością
-                        cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            detections = detect_darknet_frame(net, meta, frame)
+            for label, confidence, bbox in detections:
+                x, y, w, h = map(int, bbox)
+                x1, y1 = x - w // 2, y - h // 2
+                x2, y2 = x + w // 2, y + h // 2
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+                cv2.putText(frame, f"{label} {confidence}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+        
 
-            # Kodowanie przetworzonego obrazu do formatu JPEG
-            _, buffer = cv2.imencode('.jpg', frame)
-            frame_bytes = buffer.tobytes()
-
-            # Wysyłanie przetworzonej klatki z powrotem do serwera
-            ws.send(frame_bytes, opcode=websocket.ABNF.OPCODE_BINARY)
+        _, buffer = cv2.imencode('.jpg', frame)
+        ws.send(buffer.tobytes(), opcode=websocket.ABNF.OPCODE_BINARY)
     except Exception as e:
         print(f"błąd dla klatki: {e}")
+    finally:
+        global frame_queue
+        with queue_lock:
+            if frame_queue:
+                next_frame = frame_queue.popleft()
+                threading.Thread(target=process_frame, args=(ws, next_frame)).start()
+            else:
+                processing = False
 
 # Funkcja obsługująca błędy
 def on_error(ws, error):
@@ -90,3 +131,21 @@ ws.on_open = on_open
 # Uruchom klienta WebSocket z niestandardowym SSL
 if __name__ == "__main__":
     ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+
+def cleanup_and_exit(signum, frame):
+    global net, ws
+    try:
+        del net
+    except Exception:
+        pass
+    gc.collect()
+    torch.cuda.empty_cache()
+    try:
+        ws.keep_running = False
+        ws.close()
+    except Exception:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, cleanup_and_exit)
+signal.signal(signal.SIGINT, cleanup_and_exit)

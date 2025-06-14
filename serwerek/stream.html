@@ -4,177 +4,290 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>YOLO v3 Tiny</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f9f9f9;
+        #loading-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(255,255,255,0.8);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            z-index: 9999;
+        }
+        .loading-spinner {
+            border: 8px solid rgba(255,255,255,0.3);
+            border-top: 8px solid #007bff;
+            border-radius: 50%;
+            width: 60px; height: 60px;
+            animation: spin 1s linear infinite;
+        }
+        .loading-text {
+            margin-top: 10px;
+            font-size: 18px;
             color: #333;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
         }
-
-        h1 {
-            margin-bottom: 10px;
-            color: #444;
-        }
-
-        p {
-            margin-bottom: 20px;
-            font-size: 1rem;
-            text-align: center;
-        }
-
-        .container {
-            max-width: 400px;
-            width: 90%;
-            text-align: center;
-            background: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-
-        #stream-display {
-            width: 100%;
-            max-width: 300px;
-            height: auto;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            margin-bottom: 20px;
-        }
-
-        button {
-            display: inline-block;
-            margin: 5px;
-            padding: 10px 20px;
-            font-size: 1rem;
-            color: #fff;
-            background: #007bff;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background 0.3s;
-        }
-
-        button:hover {
-            background: #0056b3;
-        }
-
-        button:active {
-            background: #003f7f;
-        }
-
-        button:last-of-type {
-            background: #6c757d;
-        }
-
-        button:last-of-type:hover {
-            background: #5a6268;
+        @keyframes spin {
+            0% { transform: rotate(0deg);}
+            100% { transform: rotate(360deg);}
         }
     </style>
 </head>
-<body>
-    <div class="container">
-        <h1>YOLO v3 Tiny</h1>
-        <div>
-            <video id="video" autoplay playsinline style="display: none;"></video> <!-- Hidden video element -->
-            <img id="stream-display" alt="Stream not available" />
+<body class="bg-light">
+    <div class="container py-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6 col-lg-5">
+                <div class="card shadow-sm">
+                    <div class="card-body text-center">
+                        <h1 class="mb-4">Detekcja YOLO</h1>
+                        <video id="video" autoplay playsinline style="display:none; width:100%; height:auto; border:1px solid #ccc;"></video>
+                        <img id="stream-display" class="img-fluid rounded border mb-3" alt="Stream nieaktywny. Kliknij 'Rozpocznij Stream' lub przycisk detekcji." />
+                        <div class="d-grid gap-2 mb-2">
+                            <button class="btn btn-primary" onclick="startStream()">Rozpocznij Stream</button>
+                            <button class="btn btn-success" onclick="startScript()">Włącz Detekcję YOLOv3</button>
+                            <button class="btn btn-warning" onclick="startScript2()">Włącz Detekcję YOLOv5</button>
+                            <button class="btn btn-danger" onclick="stopScript()">Wyłącz Detekcję</button>
+                            <button class="btn btn-secondary" onclick="location.href='index.html'">Menu Główne</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <button onclick="startStream()">Rozpocznij Stream</button>
-        <button onclick="startScript()">Włącz Detekcję</button>
-        <button onclick="stopScript()">Wyłącz Detekcję</button>
-        <button onclick="location.href='index.html'">Menu Główne</button>
     </div>
-
+    <div id="loading-overlay" style="display:none;">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Ładowanie modelu...</div>
+    </div>
     <script>
+        // Elementy DOM
         const videoElement = document.getElementById('video');
         const streamDisplayElement = document.getElementById('stream-display');
-        let ws;
-        let scriptRunning = false;
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const startStreamButton = document.querySelector('button[onclick="startStream()"]');
+        const startScriptButton = document.querySelector('button[onclick="startScript()"]');
+        const startScript2Button = document.querySelector('button[onclick="startScript2()"]');
+        const stopScriptButton = document.querySelector('button[onclick="stopScript()"]');
+
+        // Zmienne stanu
+        let ws, cameraStream = null, sendInterval = null, reconnectTimeout = null;
+        let scriptRunning = false, waitingForDetection = false;
+        let lastCommandSent = null, shouldResendCommandOnReconnect = false;
+
+        // Ustawienia początkowe
+        videoElement.style.display = 'none';
+        streamDisplayElement.style.display = 'block';
+
+        document.addEventListener('DOMContentLoaded', updateButtonStates);
+
+        function updateButtonStates() {
+            const wsConnected = ws && ws.readyState === WebSocket.OPEN;
+            startStreamButton.disabled = wsConnected && !!cameraStream;
+            startScriptButton.disabled = scriptRunning && lastCommandSent === 'start-script';
+            startScript2Button.disabled = scriptRunning && lastCommandSent === 'start-script2';
+            stopScriptButton.disabled = !scriptRunning;
+        }
 
         function startStream() {
-            ws = new WebSocket('wss://172.29.192.121:8080');
-
+            if (ws && ws.readyState === WebSocket.OPEN && cameraStream) {
+                videoElement.style.display = 'block';
+                streamDisplayElement.style.display = 'none';
+                streamDisplayElement.src = '';
+                updateButtonStates();
+                return;
+            }
+            if (ws && ws.readyState === WebSocket.OPEN && !cameraStream) {
+                startCamera();
+                updateButtonStates();
+                return;
+            }
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.CLOSING)) {
+                console.log('WebSocket is currently connecting or closing. Please wait.');
+                return;
+            }
+            ws = new WebSocket('wss://kwiatki.westeurope.cloudapp.azure.com');
             ws.onopen = () => {
                 console.log('WebSocket connected');
-                ws.send('stream'); // zidentyfikuj jako klient streamujący
+                ws.send('stream');
+                if (shouldResendCommandOnReconnect && lastCommandSent) {
+                    _startDetectionScript(lastCommandSent);
+                } else {
+                    if (!cameraStream) startCamera();
+                    else if (!scriptRunning) {
+                        videoElement.style.display = 'block';
+                        streamDisplayElement.style.display = 'none';
+                        streamDisplayElement.src = '';
+                    }
+                    shouldResendCommandOnReconnect = false;
+                }
+                updateButtonStates();
             };
-
             ws.onmessage = (event) => {
+                if (!scriptRunning) return;
+                if (waitingForDetection) {
+                    hideLoading();
+                    waitingForDetection = false;
+                    videoElement.style.display = 'none';
+                    streamDisplayElement.style.display = 'block';
+                }
                 try {
                     const blob = new Blob([event.data], { type: 'image/jpeg' });
                     const url = URL.createObjectURL(blob);
                     streamDisplayElement.src = url;
-
-                    // zwolnij URL po załadowaniu
                     streamDisplayElement.onload = () => URL.revokeObjectURL(url);
                 } catch (error) {
-                    console.error('Error processing frame:', error);
+                    console.error('Error processing detection frame:', error);
                 }
             };
-
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                if (waitingForDetection) {
+                    hideLoading();
+                    scriptRunning = false;
+                    waitingForDetection = false;
+                    lastCommandSent = null;
+                }
+                updateButtonStates();
             };
-
             ws.onclose = () => {
                 console.log('WebSocket closed');
+                if (scriptRunning && lastCommandSent) {
+                    shouldResendCommandOnReconnect = true;
+                    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+                    reconnectTimeout = setTimeout(() => {
+                        console.log('Próba ponownego połączenia...');
+                        startStream();
+                    }, 2000);
+                } else {
+                    shouldResendCommandOnReconnect = false;
+                }
+                updateButtonStates();
             };
+        }
 
-            // dostęp do kamery
+        function startCamera() {
+            const desiredWidth = 460, desiredHeight = 460;
             navigator.mediaDevices.getUserMedia({
                 video: {
-                    width: 416,
-                    height: 416,
-                    facingMode: { exact: "environment" } // kamera tylnia
+                    width: { ideal: desiredWidth },
+                    height: { ideal: desiredHeight },
+                    facingMode: { ideal: "environment" }
                 }
             })
             .then((stream) => {
+                cameraStream = stream;
                 videoElement.srcObject = stream;
-
+                videoElement.play();
+                videoElement.style.display = 'block';
+                streamDisplayElement.style.display = 'none';
+                streamDisplayElement.src = '';
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
-                canvas.width = 416;
-                canvas.height = 416;
-
-                setInterval(() => {
-                    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-                    canvas.toBlob((blob) => {
-                        if (blob && ws.readyState === WebSocket.OPEN) {
-                            ws.send(blob); // wyślij klatkę do serwera
-                        }
-                    }, 'image/jpeg');
-                }, 100); //co 100ms
+                canvas.width = desiredWidth;
+                canvas.height = desiredHeight;
+                if (sendInterval) clearInterval(sendInterval);
+                sendInterval = setInterval(() => {
+                    if (videoElement.readyState >= videoElement.HAVE_CURRENT_DATA && cameraStream) {
+                        ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                        canvas.toBlob((blob) => {
+                            if (blob && ws && ws.readyState === WebSocket.OPEN) ws.send(blob);
+                        }, 'image/jpeg');
+                    }
+                }, 150);
+                updateButtonStates();
             })
             .catch((error) => {
                 console.error("Error accessing the camera:", error);
-                alert("Unable to access the camera.");
+                alert(`Nie można uzyskać dostępu do kamery z rozdzielczością ${desiredWidth}x${desiredHeight}: ${error.message}`);
+                videoElement.style.display = 'none';
+                streamDisplayElement.style.display = 'block';
+                streamDisplayElement.alt = "Błąd kamery. Sprawdź uprawnienia.";
+                cameraStream = null;
+                updateButtonStates();
             });
         }
 
-        function startScript() {
+        function showLoading() { loadingOverlay.style.display = 'flex'; }
+        function hideLoading() { loadingOverlay.style.display = 'none'; }
+
+        function _startDetectionScript(command) {
+            if (scriptRunning && lastCommandSent && lastCommandSent !== command) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(lastCommandSent === 'start-script' ? 'stop-script' : 'stop-script2');
+                }
+                scriptRunning = false;
+                waitingForDetection = false;
+                hideLoading();
+            }
+            showLoading();
+            scriptRunning = true;
+            waitingForDetection = true;
+            lastCommandSent = command;
+            shouldResendCommandOnReconnect = false;
+            updateButtonStates();
+            videoElement.style.display = 'block';
+            streamDisplayElement.style.display = 'none';
+            streamDisplayElement.src = '';
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('start-script'); // wyślij komendę do uruchomienia skryptu
-                console.log('Start script command sent');
-                scriptRunning = true;
+                if (!cameraStream) startCamera();
+                ws.send(command);
             } else {
-                console.error('WebSocket is not open');
+                startStream();
+                setTimeout(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        if (!cameraStream) startCamera();
+                        ws.send(command);
+                    } else {
+                        hideLoading();
+                        scriptRunning = false;
+                        waitingForDetection = false;
+                        lastCommandSent = null;
+                        updateButtonStates();
+                        alert('Nie udało się połączyć z serwerem WebSocket do uruchomienia detekcji.');
+                    }
+                }, 2000);
             }
         }
 
+        function startScript() { _startDetectionScript('start-script'); }
+        function startScript2() { _startDetectionScript('start-script2'); }
+
         function stopScript() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('stop-script'); // wyślij komendę do zatrzymania skryptu
-                console.log('Stop script command sent');
-                scriptRunning = false;
-            } else {
-                console.error('WebSocket is not open');
+            const commandToStop = lastCommandSent;
+            if (ws && ws.readyState === WebSocket.OPEN && scriptRunning) {
+                if (commandToStop === 'start-script') ws.send('stop-script');
+                else if (commandToStop === 'start-script2') ws.send('stop-script2');
+                else ws.send('stop-script');
             }
+            scriptRunning = false;
+            waitingForDetection = false;
+            hideLoading();
+            lastCommandSent = null;
+            shouldResendCommandOnReconnect = false;
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                if (!cameraStream) startCamera();
+                else {
+                    videoElement.style.display = 'block';
+                    streamDisplayElement.style.display = 'none';
+                    streamDisplayElement.src = '';
+                    streamDisplayElement.alt = "Podgląd z kamery aktywny. Wybierz detekcję.";
+                }
+            } else {
+                if (cameraStream) {
+                    cameraStream.getTracks().forEach(track => track.stop());
+                    cameraStream = null;
+                    videoElement.srcObject = null;
+                    if (sendInterval) {
+                        clearInterval(sendInterval);
+                        sendInterval = null;
+                    }
+                }
+                videoElement.style.display = 'none';
+                streamDisplayElement.style.display = 'block';
+                streamDisplayElement.alt = "Stream zatrzymany. Kliknij 'Rozpocznij Stream' lub przycisk detekcji.";
+                streamDisplayElement.src = '';
+            }
+            updateButtonStates();
         }
     </script>
 </body>
