@@ -1,0 +1,5 @@
+opencv-python
+websocket-client
+numpy
+torch
+yolov5
