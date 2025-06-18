@@ -7,15 +7,14 @@ from yolov5 import YOLOv5
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Załaduj model YOLOv5 (możesz zmienić na yolov5s.pt, yolov5m.pt, itp.)
-model_path = '/home/malinop4/Dokumenty/projekty/yolo/serwerek/best.pt'
+model_path = 'best.pt'
 if torch.cuda.is_available():
-    device = '0'  # GPU numer 0
+    device = '0' 
 else:
     device = 'cpu'
 model = YOLOv5(model_path, device)
 
-ws_url = "wss://localhost:8080"
+ws_url = "ws://localhost:8080"
 
 import threading
 from collections import deque
@@ -73,7 +72,7 @@ def on_close(ws, close_status_code, close_msg):
 
 def on_open(ws):
     print("WebSocket połączony")
-    ws.send("script2")  # Wysyłanie identyfikatora klienta
+    ws.send("script2")
 
 ws = websocket.WebSocketApp(
     ws_url,

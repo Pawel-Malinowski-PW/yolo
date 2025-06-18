@@ -2,26 +2,23 @@ import cv2
 import websocket
 import ssl
 import sys
-sys.path.insert(0, '/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/python')
 import darknet
 import numpy as np
 import signal
 import gc
 import torch
 
-# Załaduj sieć
-config_path = "/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/cfg/yolov3.cfg"
-weights_path = "/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/yolov3.weights"
-data_path = "/home/malinop4/Dokumenty/projekty/yolo/serwerek/darknet/cfg/coco.data"
+config_path = "darknet/cfg/yolov3.cfg"
+weights_path = "darknet/yolov3.weights"
+data_path = "darknet/cfg/coco.data"
 
 net = darknet.load_net(config_path.encode(), weights_path.encode(), 0)
 meta = darknet.load_meta(data_path.encode())
 
-# Konwersja numpy array (OpenCV BGR) do IMAGE (Darknet RGB)
 def array_to_image(arr):
     import cv2
     arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-    arr = arr.transpose(2, 0, 1)  # HWC -> CHW
+    arr = arr.transpose(2, 0, 1)
     c, h, w = arr.shape
     arr = arr.flatten() / 255.0
     data = (darknet.c_float * len(arr))()
@@ -44,18 +41,14 @@ def detect_darknet_frame(net, meta, frame, thresh=0.5, hier_thresh=0.5, nms=0.45
             if dets[j].prob[i] > 0:
                 b = dets[j].bbox
                 res.append((meta.names[i].decode(), dets[j].prob[i], (b.x, b.y, b.w, b.h)))
-    # NIE wywołuj darknet.free_image(im) tutaj!
     darknet.free_detections(dets, num)
     return res
 
-# Adres serwera WebSocket 
-ws_url = "wss://localhost:8080"
+ws_url = "ws://localhost:8080"
 
-# Funkcja obsługująca wiadomości przychodzące
 import threading
 from collections import deque
 
-# ...istniejący kod...
 
 frame_queue = deque(maxlen=3)
 queue_lock = threading.Lock()
@@ -65,7 +58,6 @@ def on_message(ws, message):
     global frame_queue
     with queue_lock:
         frame_queue.append(message)
-    # Uruchom przetwarzanie jeśli nie trwa
     start_processing(ws)
 
 def start_processing(ws):
@@ -106,20 +98,16 @@ def process_frame(ws, frame_data):
             else:
                 processing = False
 
-# Funkcja obsługująca błędy
 def on_error(ws, error):
     print(f"WebSocket błąd: {error}")
 
-# Funkcja obsługująca zamknięcie połączenia
 def on_close(ws, close_status_code, close_msg):
     print("WebSocket zamknięty")
 
-# Funkcja obsługująca otwarcie połączenia
 def on_open(ws):
     print("WebSocket połączony")
-    ws.send("script")  # Wysyłanie identyfikatora klienta
+    ws.send("script")
 
-# Konfiguracja WebSocket z ignorowaniem weryfikacji certyfikatu
 ws = websocket.WebSocketApp(
     ws_url,
     on_message=on_message,
@@ -128,7 +116,6 @@ ws = websocket.WebSocketApp(
 )
 ws.on_open = on_open
 
-# Uruchom klienta WebSocket z niestandardowym SSL
 if __name__ == "__main__":
     ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
