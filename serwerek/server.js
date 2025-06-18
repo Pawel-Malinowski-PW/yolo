@@ -8,6 +8,11 @@ let pythonProcess;
 
 const server = http.createServer((req, res) => {
     let filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
+    if (!filePath.startsWith(__dirname)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('403 Forbidden');
+        return;
+    }
     const ext = path.extname(filePath);
     let contentType = 'text/html';
 
@@ -186,6 +191,14 @@ wss.on('connection', (ws, req) => {
     });
 });
 
+
 server.listen(8080, 'localhost', () => {
     console.log('Serwer HTTP działa na http://localhost:8080');
+});
+
+process.on('SIGINT', () => {
+    if (pythonProcess) {
+        pythonProcess.kill();
+    }
+    process.exit();
 });
