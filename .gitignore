@@ -3,3 +3,5 @@ serwerek/server.crt
 serwerek/server.key
 serwerek/node_modules/
 serwerek/darknet/
+serwerek/best.pt
+serwerek/yolov5x.pt
