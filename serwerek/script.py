@@ -8,9 +8,9 @@ import signal
 import gc
 import torch
 
-config_path = "darknet/cfg/yolov3.cfg"
-weights_path = "darknet/yolov3.weights"
-data_path = "darknet/cfg/coco.data"
+config_path = "darknet/yolo3/yolov3-custom.cfg"
+weights_path = "darknet/backup/yolov3-custom_final.weights"
+data_path = "darknet/yolo3/obj.data"
 
 net = darknet.load_net(config_path.encode(), weights_path.encode(), 0)
 meta = darknet.load_meta(data_path.encode())
